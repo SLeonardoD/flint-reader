@@ -1,0 +1,29 @@
+[package]
+name = "pdf-lector"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "x11"] }
+egui = "0.27"
+pdfium-render = { version = "0.8", features = ["thread_safe"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+rfd = "0.14"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+png = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

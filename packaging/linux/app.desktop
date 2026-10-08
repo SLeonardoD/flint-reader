@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lector PDF
+Comment=Lector de PDF minimalista y de bajo consumo
+Exec=pdf-lector %f
+Icon=pdf-lector
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
