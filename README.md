@@ -12,29 +12,47 @@ máquina y lo pruebes con interfaz gráfica real.
 
 ## Funcionalidades implementadas
 
-- Abrir PDF (diálogo nativo, o arrastrando el archivo a la ventana)
-- Recordar página y zoom por documento, entre sesiones (`config.toml`)
-- Búsqueda de texto en todo el documento, con lista de resultados y salto
-  directo a la página
-- Ir a página específica, contador actual/total
-- Zoom (botones + atajos `Ctrl +` / `Ctrl -` / `Ctrl 0`)
-- Modo de scroll **continuo** (virtualizado: solo renderiza las páginas
-  cercanas a lo visible) y modo **paginado** (una página a la vez)
-- Panel lateral con el índice/marcadores del PDF, si lo trae
-- Pestaña de "Recientes" (no es la pantalla de inicio — se navega a ella)
+- Abrir PDF: diálogo nativo (`Ctrl+O`), arrastrando el archivo a la ventana,
+  o como argumento: `pdf-lector archivo.pdf` ("Abrir con..." del explorador)
+- **Recordar progreso por documento** (página y zoom), también mientras
+  lees haciendo scroll, y se guarda al cerrar. Cada PDF tiene el suyo.
+- Búsqueda en todo el documento: lista de resultados con contexto, contador,
+  siguiente/anterior (`Enter` / `Shift+Enter`), salto a la coincidencia y
+  **resaltado** de las palabras encontradas sobre la página
+- Ir a página escribiendo el número; el campo siempre muestra la página actual
+- Zoom: botones, `Ctrl +` / `Ctrl -` / `Ctrl 0`, y **`Ctrl` + rueda** (centrado
+  bajo el cursor)
+- Desplazamiento **continuo** (solo se dibujan las páginas cercanas a lo visible)
+  o **por página**; botón de la barra para alternar
+- Mover el documento **manteniendo pulsado el botón central** del ratón
+- **Índice/marcadores** del PDF en panel lateral (se oculta solo en ventanas
+  estrechas) y **enlaces clicables** dentro de las páginas: saltos internos y
+  URLs web (`http`, `https`, `mailto`; otros esquemas como `file://` se ignoran
+  a propósito por seguridad)
+- Pestaña de **Recientes** (no es la pantalla de inicio)
 - Tema claro/oscuro
-- Atajos de teclado: flechas/espacio/Re Pág/Av Pág para navegar,
-  `Ctrl+F` buscar, `Ctrl+O` abrir, `Esc` cerrar la barra de búsqueda
+- Barra de herramientas **abajo**, con iconos vectoriales propios, que se
+  **adapta al ancho**: al achicar la ventana pasa a un menú de opciones.
+  El título del documento va en la barra de título de la ventana.
+
+### Atajos
+
+| Tecla | Acción |
+|---|---|
+| `→` `PgDn` `Espacio` | Página siguiente |
+| `←` `PgUp` `Shift+Espacio` | Página anterior |
+| `↑` `↓` | Desplazar un poco |
+| `Inicio` / `Fin` | Primera / última página |
+| `Ctrl+F` | Buscar (`Esc` cierra) |
+| `Ctrl+O` | Abrir |
+| `Ctrl +` `Ctrl -` `Ctrl 0` / `Ctrl`+rueda | Zoom |
 
 ## Lo que falta (próximas iteraciones)
 
-- Resaltado **pixel-perfecto** de las coincidencias de búsqueda sobre la
-  página (hoy la búsqueda salta a la página correcta, pero no dibuja un
-  rectángulo exacto sobre la palabra — ver nota en `src/pdf/search.rs`)
 - Ícono propio de la aplicación (`assets/icons/`)
 - Empaquetado final (`.msi` / `.AppImage` / `.deb`)
-
----
+- Retoques estéticos (pospuestos a propósito)
+- Seleccionar y copiar texto del PDF
 
 ## Cómo compilar
 
@@ -95,13 +113,13 @@ copy pdfium\windows-x64\pdfium.dll .
 
 Después de `cargo build`, cópiala también a `target/debug/` (o
 `target/release/`) para que el ejecutable la encuentre al correr desde
-ahí. El código busca primero junto al ejecutable y, si no la encuentra,
-intenta con una instalación de PDFium ya presente en el sistema.
+ahí. El código la busca primero junto al ejecutable, luego en la carpeta desde la
+que lo lanzas, y por último como librería instalada en el sistema.
 
 ### 4. Compila
 
 ```bash
-cargo build            # build de desarrollo, rápido
+cargo build            # desarrollo (dependencias optimizadas: la primera vez tarda más)
 cargo build --release  # build optimizado (más lento de compilar: usa LTO)
 cargo run               # compila y ejecuta de una
 ```
@@ -125,20 +143,25 @@ ve bien.
 
 ---
 
-## Qué se verificó ya (en esta sesión de desarrollo)
+## Qué se verificó
 
-- `cargo check` y `cargo build` (perfil de desarrollo) pasan **sin
-  errores ni warnings**, incluido el enlazado contra X11/GTK/OpenGL.
-- El motor PDF se probó de verdad: se descargó `libpdfium.so`, se generó
-  un PDF de 3 páginas con marcadores, y se confirmó que la apertura, el
-  conteo de páginas, la extracción de índice, la búsqueda de texto (con
-  snippets correctos) y el renderizado a imagen funcionan — ver captura
-  de ese render en la conversación donde se construyó este proyecto.
-- Lo único que **no** se pudo probar en ese entorno es la ventana en sí
-  (el contenedor de desarrollo no tenía servidor gráfico), así que la
-  primera vez que vas a ver la interfaz real es cuando la corras tú.
+Probado en Linux con una ventana real (servidor gráfico virtual, teclado y
+ratón simulados), con PDFs de 3, 12 y 300 páginas:
 
----
+- Navegación secuencial con flechas/PgUp/PgDn/Inicio, ir a página, zoom
+  (botones, atajos y Ctrl+rueda), paneo con botón central
+- Progreso: al reabrir un PDF vuelve a su página y zoom; un PDF distinto
+  empieza en la página 1
+- Búsqueda con resaltado, enlaces internos (`/Dest` y `/A GoTo`), índice
+  (incluidos marcadores que guardan su destino como acción)
+- Barra responsiva y modo por página
+- Rendimiento (build de desarrollo, render por software, el peor caso):
+  300 páginas abren en ~2 s, CPU en reposo 0 %, memoria estable al navegar
+  (~145-160 MB; no crece con el número de páginas)
+
+**No se pudo probar aquí:** la compilación y ejecución en **Windows**, el
+build `--release`, y la apertura real de URLs externas (depende del navegador
+del sistema). Esas son las pruebas que tocan en tu máquina.
 
 ## Estructura del proyecto
 

@@ -1,9 +1,7 @@
-//! Vista de "Recientes": una lista de los últimos PDFs abiertos, con la
-//! página en la que se quedó cada uno. Es una pestaña separada a la que
-//! el usuario navega desde la barra de herramientas, no la pantalla de
-//! inicio de la app.
+//! Vista de "Recientes": últimos PDFs abiertos con la página en que quedaron.
 
 use crate::config::RecentList;
+use crate::ui::icons::{self, Icon};
 use std::path::PathBuf;
 
 pub enum RecentAction {
@@ -35,23 +33,26 @@ pub fn show(ui: &mut egui::Ui, recent: &RecentList) -> Option<RecentAction> {
                 ui.add_space(4.0);
 
                 let label = if missing {
-                    format!("⚠ {} (no encontrado)", item.title())
+                    format!("{} (no encontrado)", item.title())
                 } else {
                     item.title()
                 };
-
                 let button = egui::Button::new(label).frame(false);
                 if ui.add_enabled(!missing, button).clicked() {
                     action = Some(RecentAction::Open(item.path.clone()));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Quitar de recientes").clicked() {
+                    if icons::button(ui, Icon::Close, "Quitar de recientes", false).clicked() {
                         action = Some(RecentAction::Remove(item.path.clone()));
                     }
                     ui.label(
-                        egui::RichText::new(format!("pág. {}  ·  zoom {:.0}%", item.last_page + 1, item.zoom * 100.0))
-                            .weak(),
+                        egui::RichText::new(format!(
+                            "pág. {}  ·  zoom {:.0}%",
+                            item.last_page + 1,
+                            item.zoom * 100.0
+                        ))
+                        .weak(),
                     );
                 });
             });

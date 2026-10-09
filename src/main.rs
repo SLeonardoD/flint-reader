@@ -31,11 +31,17 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    // `pdf-lector archivo.pdf` abre ese archivo directamente.
+    let initial_file = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file());
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Lector PDF")
             .with_inner_size([1000.0, 760.0])
-            .with_min_inner_size([480.0, 360.0])
+            .with_min_inner_size([340.0, 300.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -43,6 +49,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "pdf-lector",
         native_options,
-        Box::new(|_cc| Box::new(App::new(engine, config))),
+        Box::new(|cc| {
+            // Ctrl +/- y Ctrl+rueda controlan el zoom del *documento*, no el de toda la interfaz.
+            cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+            Box::new(App::new(engine, config, initial_file))
+        }),
     )
 }

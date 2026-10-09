@@ -1,20 +1,19 @@
-//! `App` es el struct raíz que implementa `eframe::App`. Mantiene el
-//! estado de la aplicación (documento abierto, configuración, vista
-//! activa) y en cada frame: procesa atajos de teclado, dibuja la barra de
-//! herramientas y el resto de paneles, y aplica las acciones que estos
-//! devuelven. Los módulos de `ui` nunca mutan `App` directamente — solo
-//! dibujan y devuelven qué acción quiere el usuario.
+//! `App`: estado raíz y ciclo de eventos. En cada frame procesa atajos,
+//! dibuja los paneles y aplica las acciones que estos devuelven.
 
-use crate::config::{AppConfig, RecentList, ThemePreference};
+use crate::config::{AppConfig, RecentList, ScrollMode, ThemePreference};
 use crate::input::shortcuts::{self, ShortcutAction};
-use crate::pdf::{OpenDocument, OutlineNode, PdfEngine, SearchMatch};
+use crate::pdf::{LinkTarget, OpenDocument, OutlineNode, PageLink, PdfEngine, SearchMatch, PIXELS_PER_POINT};
 use crate::ui::recent_tab::RecentAction;
-use crate::ui::search_bar::SearchAction;
-use crate::ui::toolbar::ToolbarAction;
+use crate::ui::search_bar::{SearchAction, SearchBarState};
+use crate::ui::toolbar::{ToolbarAction, ToolbarState};
+use crate::ui::viewer::PAGE_GAP;
 use crate::ui::{recent_tab, search_bar, sidebar, theme, toolbar, viewer};
-use crate::utils::{clamp_zoom, ZOOM_STEP};
+use crate::utils::{clamp_zoom, SCROLL_STEP, ZOOM_FACTOR};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -22,27 +21,68 @@ pub enum View {
     Recent,
 }
 
-/// Estado del documento actualmente abierto: página, zoom, índice y la
-/// caché de texturas ya renderizadas (ver `texture_for`).
+/// Desplazamiento pendiente de aplicar al `ScrollArea` del visor.
+#[derive(Default, Clone, Copy)]
+pub struct ScrollTarget {
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+}
+
+/// Tras un cambio de zoom, las texturas viejas se siguen mostrando
+/// (estiradas) hasta que pasa este tiempo sin cambios; luego se re-renderizan.
+const ZOOM_SETTLE: Duration = Duration::from_millis(180);
+/// Máximo de páginas que se rasterizan por frame (mantiene la UI fluida).
+const RENDERS_PER_FRAME: u32 = 2;
+const SAVE_EVERY: Duration = Duration::from_millis(1500);
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+
 pub struct DocumentState {
     doc: OpenDocument,
+    /// Identificador único: separa el estado de scroll de cada documento.
+    pub id: u64,
     pub current_page: usize,
     pub zoom: f32,
     pub outline: Vec<OutlineNode>,
-    pub goto_input: String,
+
+    // --- scroll ---
+    pub scroll: egui::Vec2,
+    pub scroll_target: ScrollTarget,
+    pub viewer_rect: egui::Rect,
+    pub panning: bool,
+
+    // --- cachés ---
     textures: HashMap<usize, (f32, egui::TextureHandle)>,
+    links: HashMap<usize, Rc<Vec<PageLink>>>,
+    highlights: HashMap<usize, Rc<Vec<[f32; 4]>>>,
+    highlight_query: String,
+    no_highlights: Rc<Vec<[f32; 4]>>,
+    last_zoom_change: Instant,
+    pub renders_left: u32,
+
+    pub pending_link: Option<LinkTarget>,
 }
 
 impl DocumentState {
-    fn new(doc: OpenDocument, current_page: usize, zoom: f32) -> Self {
+    fn new(id: u64, doc: OpenDocument, current_page: usize, zoom: f32) -> Self {
         let outline = doc.outline();
         Self {
             doc,
+            id,
             current_page,
             zoom,
             outline,
-            goto_input: (current_page + 1).to_string(),
+            scroll: egui::Vec2::ZERO,
+            scroll_target: ScrollTarget::default(),
+            viewer_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            panning: false,
             textures: HashMap::new(),
+            links: HashMap::new(),
+            highlights: HashMap::new(),
+            highlight_query: String::new(),
+            no_highlights: Rc::new(Vec::new()),
+            last_zoom_change: Instant::now() - Duration::from_secs(10),
+            renders_left: RENDERS_PER_FRAME,
+            pending_link: None,
         }
     }
 
@@ -59,36 +99,145 @@ impl DocumentState {
     }
 
     pub fn page_size_points(&self, index: usize) -> (f32, f32) {
-        self.doc.page_size_points(index).unwrap_or((612.0, 792.0))
+        self.doc.page_size_points(index)
     }
 
-    /// Devuelve la textura ya renderizada de la página `index`, renderizándola
-    /// (y cacheándola) primero si hace falta o si el zoom cambió desde la
-    /// última vez.
-    pub fn texture_for(&mut self, ctx: &egui::Context, index: usize) -> Option<egui::TextureHandle> {
-        if let Some((zoom, tex)) = self.textures.get(&index) {
-            if (*zoom - self.zoom).abs() < f32::EPSILON {
+    /// Tamaño de la página en puntos de pantalla con el zoom actual.
+    pub fn page_extent(&self, index: usize) -> egui::Vec2 {
+        let (w, h) = self.doc.page_size_points(index);
+        egui::vec2(w, h) * (self.zoom * PIXELS_PER_POINT)
+    }
+
+    /// Coordenada Y (en el contenido del scroll continuo) del borde superior de una página.
+    pub fn page_top(&self, index: usize) -> f32 {
+        let mut y = PAGE_GAP;
+        for j in 0..index {
+            y += self.page_extent(j).y + PAGE_GAP;
+        }
+        y
+    }
+
+    // ---------------------------------------------------------------- scroll
+
+    /// Desplaza el visor para mostrar `page`; con `y_pts` (posición dentro de
+    /// la página, en puntos PDF) deja ese punto a ~30% desde arriba.
+    pub fn scroll_to_page(&mut self, page: usize, y_pts: Option<f32>, mode: ScrollMode) {
+        let page = page.min(self.page_count().saturating_sub(1));
+        self.current_page = page;
+        let vh = self.viewer_rect.height().max(100.0);
+        let px_per_pt = self.zoom * PIXELS_PER_POINT;
+
+        let y = match (mode, y_pts) {
+            (ScrollMode::Continuous, None) => self.page_top(page) - PAGE_GAP,
+            (ScrollMode::Continuous, Some(yp)) => self.page_top(page) + yp * px_per_pt - vh * 0.3,
+            (ScrollMode::Paginated, None) => 0.0,
+            (ScrollMode::Paginated, Some(yp)) => yp * px_per_pt + PAGE_GAP - vh * 0.3,
+        };
+        self.scroll_target.y = Some(y.max(0.0));
+    }
+
+    /// Desplazamiento relativo (flechas, paneo con el ratón).
+    pub fn nudge_scroll(&mut self, dx: f32, dy: f32) {
+        let base_x = self.scroll_target.x.unwrap_or(self.scroll.x);
+        let base_y = self.scroll_target.y.unwrap_or(self.scroll.y);
+        self.scroll_target.x = Some((base_x + dx).max(0.0));
+        self.scroll_target.y = Some((base_y + dy).max(0.0));
+    }
+
+    /// Cambia el zoom manteniendo fijo el punto `anchor` (relativo al visor).
+    pub fn zoom_to(&mut self, new_zoom: f32, anchor: egui::Vec2) {
+        let new_zoom = clamp_zoom(new_zoom);
+        if (new_zoom - self.zoom).abs() < 1e-4 {
+            return;
+        }
+        let ratio = new_zoom / self.zoom;
+        let base_x = self.scroll_target.x.unwrap_or(self.scroll.x);
+        let base_y = self.scroll_target.y.unwrap_or(self.scroll.y);
+        self.scroll_target.x = Some(((base_x + anchor.x) * ratio - anchor.x).max(0.0));
+        self.scroll_target.y = Some(((base_y + anchor.y) * ratio - anchor.y).max(0.0));
+        self.zoom = new_zoom;
+        self.last_zoom_change = Instant::now();
+    }
+
+    // -------------------------------------------------------------- texturas
+
+    /// Textura de la página. `force` ignora el límite de renders por frame.
+    /// Si hay una textura vieja (otro zoom) se devuelve mientras tanto.
+    pub fn texture_for(&mut self, ctx: &egui::Context, index: usize, force: bool) -> Option<egui::TextureHandle> {
+        let scale = self.zoom * ctx.pixels_per_point();
+
+        if let Some((s, tex)) = self.textures.get(&index) {
+            if (s - scale).abs() < 1e-3 {
                 return Some(tex.clone());
             }
+            if self.last_zoom_change.elapsed() < ZOOM_SETTLE {
+                ctx.request_repaint_after(ZOOM_SETTLE);
+                return Some(tex.clone());
+            }
+            if !force && self.renders_left == 0 {
+                ctx.request_repaint();
+                return Some(tex.clone());
+            }
+        } else if !force && self.renders_left == 0 {
+            ctx.request_repaint();
+            return None;
         }
 
-        let rendered = self.doc.render_page(index, self.zoom).ok()?;
-        let tex = ctx.load_texture(
-            format!("page-{index}"),
-            rendered.image,
-            egui::TextureOptions::LINEAR,
-        );
-        self.textures.insert(index, (self.zoom, tex.clone()));
-        Some(tex)
+        self.renders_left = self.renders_left.saturating_sub(1);
+        match self.doc.render_page(index, scale) {
+            Ok(rendered) => {
+                let tex = ctx.load_texture(format!("page-{index}"), rendered.image, egui::TextureOptions::LINEAR);
+                self.textures.insert(index, (scale, tex.clone()));
+                Some(tex)
+            }
+            Err(err) => {
+                tracing::warn!("{err}");
+                None
+            }
+        }
     }
 
-    /// Libera la textura de una página que salió de la ventana de precarga.
     pub fn release_texture(&mut self, index: usize) {
         self.textures.remove(&index);
     }
 
-    fn invalidate_textures(&mut self) {
-        self.textures.clear();
+    pub fn keep_textures_near(&mut self, index: usize, radius: usize) {
+        self.textures.retain(|&i, _| i.abs_diff(index) <= radius);
+    }
+
+    // ----------------------------------------------- enlaces y búsqueda
+
+    pub fn links_for(&mut self, index: usize) -> Rc<Vec<PageLink>> {
+        if let Some(l) = self.links.get(&index) {
+            return l.clone();
+        }
+        let l = Rc::new(self.doc.page_links(index));
+        self.links.insert(index, l.clone());
+        l
+    }
+
+    pub fn set_highlight_query(&mut self, query: &str) {
+        if self.highlight_query != query {
+            self.highlight_query = query.to_string();
+            self.highlights.clear();
+        }
+    }
+
+    pub fn highlights_for(&mut self, index: usize) -> Rc<Vec<[f32; 4]>> {
+        if self.highlight_query.is_empty() {
+            return self.no_highlights.clone();
+        }
+        if let Some(h) = self.highlights.get(&index) {
+            return h.clone();
+        }
+        let h = Rc::new(self.doc.search_rects(index, &self.highlight_query));
+        self.highlights.insert(index, h.clone());
+        h
+    }
+
+    /// Posición Y (puntos PDF) de la primera coincidencia en la página.
+    pub fn first_match_y(&mut self, index: usize) -> Option<f32> {
+        self.highlights_for(index).iter().map(|r| r[1]).reduce(f32::min)
     }
 
     pub fn search(&self, query: &str) -> Vec<SearchMatch> {
@@ -101,37 +250,63 @@ pub struct App {
     config: AppConfig,
     view: View,
     document: Option<DocumentState>,
+    next_doc_id: u64,
 
     search_open: bool,
     search_query: String,
     search_results: Vec<SearchMatch>,
     search_selected: usize,
     search_request_focus: bool,
+    search_pending: Option<Instant>,
+    /// `false` hasta que el usuario salta al primer resultado de la búsqueda actual.
+    search_visited: bool,
 
     status: Option<String>,
     theme_applied: Option<ThemePreference>,
+    last_title: String,
+
+    // Guardado del progreso de lectura (con retardo, para no escribir a disco en cada frame).
+    last_tracked: Option<(usize, f32)>,
+    dirty: bool,
+    last_save: Instant,
 }
 
 impl App {
-    pub fn new(engine: PdfEngine, config: AppConfig) -> Self {
-        Self {
+    /// `initial_file`: PDF a abrir al arrancar (argumento de línea de comandos,
+    /// o "Abrir con..." desde el explorador de archivos).
+    pub fn new(engine: PdfEngine, config: AppConfig, initial_file: Option<PathBuf>) -> Self {
+        let mut app = Self {
             engine,
             config,
             view: View::Reader,
             document: None,
+            next_doc_id: 1,
             search_open: false,
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
             search_request_focus: false,
+            search_pending: None,
+            search_visited: false,
             status: None,
             theme_applied: None,
+            last_title: String::new(),
+            last_tracked: None,
+            dirty: false,
+            last_save: Instant::now(),
+        };
+        if let Some(path) = initial_file {
+            app.open_path(path);
         }
+        app
     }
+
+    // ------------------------------------------------------------ documentos
 
     fn open_path(&mut self, path: PathBuf) {
         match self.engine.open(&path) {
             Ok(doc) => {
+                // Posición guardada de ESTE documento (o inicio si es nuevo).
                 let (page, zoom) = self
                     .config
                     .recent
@@ -139,19 +314,28 @@ impl App {
                     .map(|r| (r.last_page, r.zoom))
                     .unwrap_or((0, self.config.settings.default_zoom));
 
-                let page_count = doc.page_count().max(1);
-                let page = page.min(page_count - 1);
-                let state = DocumentState::new(doc, page, clamp_zoom(zoom));
+                let page = page.min(doc.page_count().max(1) - 1);
+                let id = self.next_doc_id;
+                self.next_doc_id += 1;
 
-                self.config
-                    .recent
-                    .touch(path, state.current_page, state.zoom);
-                let _ = self.config.save();
+                let mut state = DocumentState::new(id, doc, page, clamp_zoom(zoom));
+                state.scroll_to_page(page, None, self.config.settings.scroll_mode);
+                tracing::info!(
+                    "Abierto {} ({} págs, {} marcadores raíz)",
+                    state.title(),
+                    state.page_count(),
+                    state.outline.len()
+                );
 
+                self.config.recent.touch(path, state.current_page, state.zoom);
                 self.document = Some(state);
+                self.last_tracked = None;
+                self.dirty = true;
+
                 self.view = View::Reader;
                 self.search_open = false;
                 self.search_results.clear();
+                self.search_pending = None;
                 self.status = None;
             }
             Err(err) => {
@@ -166,71 +350,106 @@ impl App {
         }
     }
 
-    /// Guarda en `config.toml` la página/zoom actuales del documento abierto.
-    fn save_current_state(&mut self) {
-        if let Some(doc) = &self.document {
-            let path = doc.path().to_path_buf();
-            self.config
-                .recent
-                .update_state(&path, doc.current_page, doc.zoom);
-            let _ = self.config.save();
+    // ------------------------------------------------------------ navegación
+
+    fn go_to_page(&mut self, page: usize) {
+        let mode = self.config.settings.scroll_mode;
+        if let Some(doc) = &mut self.document {
+            doc.scroll_to_page(page, None, mode);
         }
     }
 
     fn go_to_relative(&mut self, delta: isize) {
+        let mode = self.config.settings.scroll_mode;
         if let Some(doc) = &mut self.document {
-            let count = doc.page_count().max(1);
-            let current = doc.current_page as isize;
-            let target = (current + delta).clamp(0, count as isize - 1) as usize;
-            doc.current_page = target;
-            doc.goto_input = (target + 1).to_string();
+            let last = doc.page_count().max(1) as isize - 1;
+            let target = (doc.current_page as isize + delta).clamp(0, last) as usize;
+            doc.scroll_to_page(target, None, mode);
         }
-        self.save_current_state();
     }
 
-    fn go_to_page(&mut self, page_index: usize) {
+    fn zoom_by(&mut self, factor: f32) {
         if let Some(doc) = &mut self.document {
-            let count = doc.page_count().max(1);
-            let target = page_index.min(count - 1);
-            doc.current_page = target;
-            doc.goto_input = (target + 1).to_string();
+            let anchor = doc.viewer_rect.size() / 2.0;
+            let target = doc.zoom * factor;
+            doc.zoom_to(target, anchor);
         }
-        self.save_current_state();
-    }
-
-    fn adjust_zoom(&mut self, delta: f32) {
-        if let Some(doc) = &mut self.document {
-            let new_zoom = clamp_zoom(doc.zoom + delta);
-            if (new_zoom - doc.zoom).abs() > f32::EPSILON {
-                doc.zoom = new_zoom;
-                doc.invalidate_textures();
-            }
-        }
-        self.save_current_state();
     }
 
     fn set_zoom(&mut self, zoom: f32) {
         if let Some(doc) = &mut self.document {
-            doc.zoom = clamp_zoom(zoom);
-            doc.invalidate_textures();
+            let anchor = doc.viewer_rect.size() / 2.0;
+            doc.zoom_to(zoom, anchor);
         }
-        self.save_current_state();
     }
+
+    fn follow_link(&mut self, target: LinkTarget) {
+        match target {
+            LinkTarget::Page(page) => self.go_to_page(page),
+            LinkTarget::Uri(uri) => {
+                let lower = uri.to_lowercase();
+                let safe = lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:");
+                if safe {
+                    if let Err(err) = open::that(&uri) {
+                        self.status = Some(format!("No se pudo abrir el enlace: {err}"));
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------- búsqueda
 
     fn toggle_search(&mut self) {
         self.search_open = !self.search_open;
         self.search_request_focus = self.search_open;
         if !self.search_open {
             self.search_results.clear();
+            self.search_pending = None;
+            if let Some(doc) = &mut self.document {
+                doc.set_highlight_query("");
+            }
         }
     }
 
     fn run_search(&mut self) {
-        if let Some(doc) = &self.document {
-            self.search_results = doc.search(&self.search_query);
+        self.search_pending = None;
+        let query = self.search_query.trim().to_string();
+        if let Some(doc) = &mut self.document {
+            self.search_results = doc.search(&query);
             self.search_selected = 0;
+            self.search_visited = false;
+            doc.set_highlight_query(&query);
         }
     }
+
+    fn jump_to_result(&mut self, index: usize) {
+        let Some(result) = self.search_results.get(index) else { return };
+        let page = result.page_index;
+        self.search_selected = index;
+        self.search_visited = true;
+        let mode = self.config.settings.scroll_mode;
+        if let Some(doc) = &mut self.document {
+            let y = doc.first_match_y(page);
+            doc.scroll_to_page(page, y, mode);
+        }
+    }
+
+    fn step_result(&mut self, backwards: bool) {
+        let n = self.search_results.len();
+        if n == 0 {
+            return;
+        }
+        // Primera pulsación tras buscar: ir al primer (o último) resultado, no saltárselo.
+        if !self.search_visited {
+            self.jump_to_result(if backwards { n - 1 } else { 0 });
+            return;
+        }
+        let next = if backwards { (self.search_selected + n - 1) % n } else { (self.search_selected + 1) % n };
+        self.jump_to_result(next);
+    }
+
+    // ---------------------------------------------------------- acciones UI
 
     fn apply_toolbar_action(&mut self, action: ToolbarAction) {
         match action {
@@ -238,21 +457,25 @@ impl App {
             ToolbarAction::PrevPage => self.go_to_relative(-1),
             ToolbarAction::NextPage => self.go_to_relative(1),
             ToolbarAction::GotoPage(p) => self.go_to_page(p),
-            ToolbarAction::ZoomIn => self.adjust_zoom(ZOOM_STEP),
-            ToolbarAction::ZoomOut => self.adjust_zoom(-ZOOM_STEP),
+            ToolbarAction::ZoomIn => self.zoom_by(ZOOM_FACTOR),
+            ToolbarAction::ZoomOut => self.zoom_by(1.0 / ZOOM_FACTOR),
             ToolbarAction::ZoomReset => self.set_zoom(1.0),
             ToolbarAction::ToggleSearch => self.toggle_search(),
             ToolbarAction::ToggleTheme => {
                 self.config.settings.theme = self.config.settings.theme.toggled();
-                let _ = self.config.save();
+                self.dirty = true;
             }
             ToolbarAction::ToggleScrollMode => {
                 self.config.settings.scroll_mode = self.config.settings.scroll_mode.toggled();
-                let _ = self.config.save();
+                self.dirty = true;
+                // Mantener la página actual al cambiar de modo.
+                if let Some(page) = self.document.as_ref().map(|d| d.current_page) {
+                    self.go_to_page(page);
+                }
             }
             ToolbarAction::ToggleSidebar => {
                 self.config.settings.sidebar_open = !self.config.settings.sidebar_open;
-                let _ = self.config.save();
+                self.dirty = true;
             }
             ToolbarAction::ShowRecent => self.view = View::Recent,
             ToolbarAction::ShowReader => self.view = View::Reader,
@@ -263,8 +486,20 @@ impl App {
         match action {
             ShortcutAction::NextPage => self.go_to_relative(1),
             ShortcutAction::PrevPage => self.go_to_relative(-1),
-            ShortcutAction::ZoomIn => self.adjust_zoom(ZOOM_STEP),
-            ShortcutAction::ZoomOut => self.adjust_zoom(-ZOOM_STEP),
+            ShortcutAction::FirstPage => self.go_to_page(0),
+            ShortcutAction::LastPage => self.go_to_page(usize::MAX),
+            ShortcutAction::ScrollUp => {
+                if let Some(doc) = &mut self.document {
+                    doc.nudge_scroll(0.0, -SCROLL_STEP);
+                }
+            }
+            ShortcutAction::ScrollDown => {
+                if let Some(doc) = &mut self.document {
+                    doc.nudge_scroll(0.0, SCROLL_STEP);
+                }
+            }
+            ShortcutAction::ZoomIn => self.zoom_by(ZOOM_FACTOR),
+            ShortcutAction::ZoomOut => self.zoom_by(1.0 / ZOOM_FACTOR),
             ShortcutAction::ZoomReset => self.set_zoom(1.0),
             ShortcutAction::ToggleSearch => self.toggle_search(),
             ShortcutAction::OpenFile => self.pick_and_open(),
@@ -280,15 +515,69 @@ impl App {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
-                let is_pdf = path
-                    .extension()
-                    .map(|e| e.eq_ignore_ascii_case("pdf"))
-                    .unwrap_or(false);
+                let is_pdf = path.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false);
                 if is_pdf {
                     self.open_path(path);
                     break;
                 }
             }
+        }
+    }
+
+    /// Ctrl + rueda (o pellizco en trackpad): zoom centrado en el cursor.
+    fn handle_wheel_zoom(&mut self, ctx: &egui::Context) {
+        if self.view != View::Reader {
+            return;
+        }
+        let zoom_delta = ctx.input(|i| i.zoom_delta());
+        if (zoom_delta - 1.0).abs() < 1e-4 {
+            return;
+        }
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        if let (Some(doc), Some(pos)) = (&mut self.document, hover) {
+            if doc.viewer_rect.contains(pos) {
+                let anchor = pos - doc.viewer_rect.min;
+                // Suavizado: una muesca de rueda sube ~28 %, demasiado brusco para leer.
+                let target = doc.zoom * zoom_delta.powf(0.75);
+                doc.zoom_to(target, anchor);
+            }
+        }
+    }
+
+    // ------------------------------------------------- progreso y ventana
+
+    /// Anota página/zoom actuales y los escribe a disco con retardo.
+    fn track_progress(&mut self, ctx: &egui::Context) {
+        if let Some(doc) = &self.document {
+            let state = (doc.current_page, doc.zoom);
+            if self.last_tracked != Some(state) {
+                let path = doc.path().to_path_buf();
+                self.config.recent.update_state(&path, state.0, state.1);
+                self.last_tracked = Some(state);
+                self.dirty = true;
+            }
+        }
+        if self.dirty {
+            if self.last_save.elapsed() >= SAVE_EVERY {
+                if let Err(err) = self.config.save() {
+                    tracing::warn!("No se pudo guardar la configuración: {err}");
+                }
+                self.dirty = false;
+                self.last_save = Instant::now();
+            } else {
+                ctx.request_repaint_after(SAVE_EVERY);
+            }
+        }
+    }
+
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.document {
+            Some(doc) => format!("{} — Lector PDF", doc.title()),
+            None => "Lector PDF".to_string(),
+        };
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
         }
     }
 
@@ -303,67 +592,75 @@ impl eframe::App for App {
             theme::apply(ctx, self.config.settings.theme);
             self.theme_applied = Some(self.config.settings.theme);
         }
+        if let Some(doc) = &mut self.document {
+            doc.renders_left = RENDERS_PER_FRAME;
+        }
 
         for action in shortcuts::poll(ctx) {
             self.apply_shortcut(action);
         }
-
+        self.handle_wheel_zoom(ctx);
         self.handle_dropped_files(ctx);
 
-        // ---------- Barra de herramientas ----------
-        let title = self.document.as_ref().map(|d| d.title().to_string());
+        // Búsqueda con retardo: se lanza cuando el usuario deja de escribir.
+        if let Some(since) = self.search_pending {
+            if since.elapsed() >= SEARCH_DEBOUNCE {
+                self.run_search();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+
+        // ---------- Barra de herramientas (abajo) ----------
         let (current_page, page_count, zoom, sidebar_available) = match &self.document {
-            Some(doc) => (doc.current_page, doc.page_count(), doc.zoom, !doc.outline.is_empty()),
+            Some(d) => (d.current_page, d.page_count(), d.zoom, !d.outline.is_empty()),
             None => (0, 0, 1.0, false),
         };
-
-        let mut goto_input_buf = self
-            .document
-            .as_ref()
-            .map(|d| d.goto_input.clone())
-            .unwrap_or_default();
-
+        let mut goto_input = String::new();
         let toolbar_actions = {
-            let mut toolbar_state = toolbar::ToolbarState {
-                title: title.as_deref(),
+            let mut tb = ToolbarState {
                 current_page,
                 page_count,
                 zoom,
-                goto_input: &mut goto_input_buf,
+                goto_input: &mut goto_input,
                 view: self.view,
                 theme: self.config.settings.theme,
                 scroll_mode: self.config.settings.scroll_mode,
                 sidebar_open: self.config.settings.sidebar_open,
                 sidebar_available,
+                search_open: self.search_open,
             };
-            toolbar::show(ctx, &mut toolbar_state)
+            toolbar::show(ctx, &mut tb)
         };
-
-        if let Some(doc) = &mut self.document {
-            doc.goto_input = goto_input_buf;
-        }
-
         for action in toolbar_actions {
             self.apply_toolbar_action(action);
         }
 
-        // ---------- Barra de búsqueda ----------
+        // ---------- Barra de búsqueda (justo encima de la barra de herramientas) ----------
         if self.search_open {
-            let search_actions = {
-                let mut search_state = search_bar::SearchBarState {
+            let actions = {
+                let mut st = SearchBarState {
                     query: &mut self.search_query,
                     results: &self.search_results,
-                    selected: &mut self.search_selected,
+                    selected: self.search_selected,
                     request_focus: self.search_request_focus,
                 };
-                search_bar::show(ctx, &mut search_state)
+                search_bar::show(ctx, &mut st)
             };
             self.search_request_focus = false;
 
-            for action in search_actions {
+            for action in actions {
                 match action {
-                    SearchAction::RunSearch => self.run_search(),
-                    SearchAction::JumpTo(page) => self.go_to_page(page),
+                    SearchAction::Edited => self.search_pending = Some(Instant::now()),
+                    SearchAction::Submit { backwards } => {
+                        if self.search_pending.is_some() {
+                            self.run_search();
+                        }
+                        self.step_result(backwards);
+                    }
+                    SearchAction::Prev => self.step_result(true),
+                    SearchAction::Next => self.step_result(false),
+                    SearchAction::JumpTo(i) => self.jump_to_result(i),
                     SearchAction::Close => self.toggle_search(),
                 }
             }
@@ -371,11 +668,14 @@ impl eframe::App for App {
 
         // ---------- Panel lateral de índice ----------
         let mut outline_goto: Option<usize> = None;
-        if sidebar_available && self.config.settings.sidebar_open && matches!(self.view, View::Reader) {
+        let screen_w = ctx.screen_rect().width();
+        let sidebar_fits = screen_w >= 560.0;
+        if sidebar_available && self.config.settings.sidebar_open && self.view == View::Reader && sidebar_fits {
             let document = &self.document;
             egui::SidePanel::left("sidebar")
                 .resizable(true)
-                .default_width(self.config.settings.sidebar_width)
+                .default_width(self.config.settings.sidebar_width.min(screen_w * 0.4))
+                .max_width(screen_w * 0.45)
                 .show(ctx, |ui| {
                     if let Some(doc) = document {
                         outline_goto = sidebar::show(ui, &doc.outline);
@@ -387,7 +687,7 @@ impl eframe::App for App {
         }
 
         // ---------- Panel central ----------
-        let mut pending_recent_action: Option<RecentAction> = None;
+        let mut recent_action: Option<RecentAction> = None;
         let mut open_requested = false;
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -398,12 +698,12 @@ impl eframe::App for App {
 
             match self.view {
                 View::Recent => {
-                    pending_recent_action = recent_tab::show(ui, self.recent());
+                    recent_action = recent_tab::show(ui, self.recent());
                 }
                 View::Reader => {
                     if let Some(doc) = &mut self.document {
-                        let scroll_mode = self.config.settings.scroll_mode;
-                        viewer::show(ui, ctx, doc, scroll_mode);
+                        let mode = self.config.settings.scroll_mode;
+                        viewer::show(ui, ctx, doc, mode);
                     } else {
                         ui.add_space(64.0);
                         ui.vertical_centered(|ui| {
@@ -411,7 +711,7 @@ impl eframe::App for App {
                             ui.add_space(8.0);
                             ui.label("Arrastra un PDF aquí, o ábrelo con el botón de abajo.");
                             ui.add_space(16.0);
-                            if ui.button("📂 Abrir un PDF…").clicked() {
+                            if ui.button("Abrir un PDF…").clicked() {
                                 open_requested = true;
                             }
                         });
@@ -423,20 +723,28 @@ impl eframe::App for App {
         if open_requested {
             self.pick_and_open();
         }
-
-        if let Some(action) = pending_recent_action {
+        if let Some(action) = recent_action {
             match action {
                 RecentAction::Open(path) => self.open_path(path),
                 RecentAction::Remove(path) => {
                     self.config.recent.remove(&path);
-                    let _ = self.config.save();
+                    self.dirty = true;
                 }
             }
         }
+        if let Some(link) = self.document.as_mut().and_then(|d| d.pending_link.take()) {
+            self.follow_link(link);
+        }
+
+        self.track_progress(ctx);
+        self.update_window_title(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_current_state();
+        if let Some(doc) = &self.document {
+            let path = doc.path().to_path_buf();
+            self.config.recent.update_state(&path, doc.current_page, doc.zoom);
+        }
         let _ = self.config.save();
     }
 }

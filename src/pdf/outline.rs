@@ -12,7 +12,23 @@ pub fn build_outline(doc: &PdfDocument) -> Vec<OutlineNode> {
         collect_siblings(&first, &mut roots);
     }
 
+    tracing::info!("Índice del documento: {} entrada(s) de primer nivel", roots.len());
     roots
+}
+
+/// Página de destino de un marcador. Muchos PDFs guardan el destino en una
+/// *acción* (`/A GoTo`) en vez de en `/Dest`, así que se prueban ambos.
+fn bookmark_page(bookmark: &PdfBookmark) -> Option<usize> {
+    if let Some(dest) = bookmark.destination() {
+        if let Ok(page) = dest.page_index() {
+            return Some(page as usize);
+        }
+    }
+
+    let action = bookmark.action()?;
+    let local = action.as_local_destination_action()?;
+    let dest = local.destination().ok()?;
+    dest.page_index().ok().map(|page| page as usize)
 }
 
 /// Recorre `node` y todos sus hermanos (`next_sibling`), añadiéndolos a `out`;
@@ -34,11 +50,7 @@ fn collect_siblings(node: &PdfBookmark, out: &mut Vec<OutlineNode>) {
         let title = bookmark
             .title()
             .unwrap_or_else(|| "(sin título)".to_string());
-
-        let page_index = bookmark
-            .destination()
-            .and_then(|dest| dest.page_index().ok())
-            .map(|i| i as usize);
+        let page_index = bookmark_page(&bookmark);
 
         let mut children = Vec::new();
         if let Some(child) = bookmark.first_child() {

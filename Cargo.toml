@@ -3,8 +3,6 @@ name = "pdf-lector"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "x11"] }
 egui = "0.27"
@@ -14,12 +12,21 @@ toml = "0.8"
 directories = "5"
 rfd = "0.14"
 anyhow = "1"
+open = "5"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 png = "0.17"
+
+# En desarrollo optimizamos las dependencias (egui, pdfium-render, ...) para que
+# `cargo run` no se sienta lento al dibujar páginas; tu propio código queda en opt-level 1.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

@@ -55,12 +55,6 @@ impl ScrollMode {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            ScrollMode::Continuous => "Continuo",
-            ScrollMode::Paginated => "Por página",
-        }
-    }
 }
 
 fn default_zoom() -> f32 {
