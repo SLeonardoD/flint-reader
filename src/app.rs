@@ -3,7 +3,7 @@
 
 use crate::config::{AppConfig, RecentList, ScrollMode, ThemePreference};
 use crate::input::shortcuts::{self, ShortcutAction};
-use crate::pdf::{LinkTarget, OpenDocument, OutlineNode, PageLink, PdfEngine, SearchMatch, PIXELS_PER_POINT};
+use crate::pdf::{LinkTarget, OpenDocument, OutlineNode, PageChars, PageLink, PdfEngine, SearchMatch, PIXELS_PER_POINT};
 use crate::ui::recent_tab::RecentAction;
 use crate::ui::search_bar::{SearchAction, SearchBarState};
 use crate::ui::toolbar::{ToolbarAction, ToolbarState};
@@ -28,6 +28,49 @@ pub struct ScrollTarget {
     pub y: Option<f32>,
 }
 
+/// Posición de cursor dentro del texto del documento: página y hueco entre
+/// caracteres (`0` = antes del primero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPos {
+    pub page: usize,
+    pub caret: usize,
+}
+
+/// Texto seleccionado: del ancla (donde empezó el arrastre) a la cabeza (donde está el ratón).
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub anchor: TextPos,
+    pub head: TextPos,
+}
+
+impl Selection {
+    /// `(inicio, fin)` en orden de lectura, sea cual sea la dirección del arrastre.
+    pub fn ordered(&self) -> (TextPos, TextPos) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragMode {
+    /// Arrastre que selecciona texto.
+    Select,
+    /// La página no tiene texto: el arrastre mueve el documento.
+    Pan,
+}
+
+/// Arrastre con el botón izquierdo en curso.
+#[derive(Debug, Clone, Copy)]
+pub struct SelDrag {
+    pub start: egui::Pos2,
+    pub mode: DragMode,
+    pub moved: bool,
+    pub anchor: TextPos,
+}
+
 /// Tras un cambio de zoom, las texturas viejas se siguen mostrando
 /// (estiradas) hasta que pasa este tiempo sin cambios; luego se re-renderizan.
 const ZOOM_SETTLE: Duration = Duration::from_millis(180);
@@ -48,12 +91,27 @@ pub struct DocumentState {
     pub scroll: egui::Vec2,
     pub scroll_target: ScrollTarget,
     pub viewer_rect: egui::Rect,
-    pub panning: bool,
+
+    // --- autoscroll con la rueda: un clic central lo activa, otro lo desactiva ---
+    pub autoscroll_origin: Option<egui::Pos2>,
+    /// Verdadero el frame en que un clic cierra el autoscroll: ese clic no debe abrir un enlace.
+    pub ignore_click: bool,
+
+    // --- selección de texto ---
+    pub selection: Option<Selection>,
+    pub sel_drag: Option<SelDrag>,
+    /// Páginas dibujadas en este frame y su rectángulo en pantalla.
+    pub page_rects: Vec<(usize, egui::Rect)>,
+    pub hovering_link: bool,
+
+    /// Salto pendiente de verificar: (página destino, reintentos que quedan).
+    pub jump: Option<(usize, u8)>,
 
     // --- cachés ---
     textures: HashMap<usize, (f32, egui::TextureHandle)>,
     links: HashMap<usize, Rc<Vec<PageLink>>>,
     highlights: HashMap<usize, Rc<Vec<[f32; 4]>>>,
+    chars: HashMap<usize, Rc<PageChars>>,
     highlight_query: String,
     no_highlights: Rc<Vec<[f32; 4]>>,
     last_zoom_change: Instant,
@@ -74,7 +132,14 @@ impl DocumentState {
             scroll: egui::Vec2::ZERO,
             scroll_target: ScrollTarget::default(),
             viewer_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
-            panning: false,
+            autoscroll_origin: None,
+            ignore_click: false,
+            selection: None,
+            sel_drag: None,
+            page_rects: Vec::new(),
+            hovering_link: false,
+            jump: None,
+            chars: HashMap::new(),
             textures: HashMap::new(),
             links: HashMap::new(),
             highlights: HashMap::new(),
@@ -134,6 +199,10 @@ impl DocumentState {
             (ScrollMode::Paginated, Some(yp)) => yp * px_per_pt + PAGE_GAP - vh * 0.3,
         };
         self.scroll_target.y = Some(y.max(0.0));
+        // Salto a "arriba de la página": el visor comprueba al maquetar que quedó
+        // bien colocada y, si no, la corrige (ver `viewer::continuous`).
+        self.jump = if mode == ScrollMode::Continuous && y_pts.is_none() { Some((page, 3)) } else { None };
+        tracing::info!("Ir a la página {} ({:?}) -> desplazamiento y = {:.0}", page + 1, mode, y.max(0.0));
     }
 
     /// Desplazamiento relativo (flechas, paneo con el ratón).
@@ -199,6 +268,7 @@ impl DocumentState {
 
     pub fn release_texture(&mut self, index: usize) {
         self.textures.remove(&index);
+        self.chars.remove(&index);
     }
 
     pub fn keep_textures_near(&mut self, index: usize, radius: usize) {
@@ -243,6 +313,67 @@ impl DocumentState {
     pub fn search(&self, query: &str) -> Vec<SearchMatch> {
         self.doc.search(query)
     }
+
+    // ----------------------------------------------- selección de texto
+
+    pub fn chars_for(&mut self, index: usize) -> Rc<PageChars> {
+        if let Some(c) = self.chars.get(&index) {
+            return c.clone();
+        }
+        let c = Rc::new(self.doc.page_chars(index));
+        self.chars.insert(index, c.clone());
+        c
+    }
+
+    /// Página bajo `pos` (pantalla) y el punto en coordenadas de página (puntos PDF).
+    pub fn page_at(&self, pos: egui::Pos2) -> Option<(usize, egui::Vec2)> {
+        let (index, rect) = self.page_rects.iter().find(|(_, r)| r.contains(pos))?;
+        let (w_pts, _) = self.doc.page_size_points(*index);
+        let scale = rect.width() / w_pts.max(1.0);
+        Some((*index, (pos - rect.min) / scale))
+    }
+
+    /// Posición de cursor de texto más cercana a `pos`, aunque el ratón
+    /// esté fuera de las páginas (arrastre que se sale del texto).
+    pub fn text_pos_at(&mut self, pos: egui::Pos2) -> Option<TextPos> {
+        let (index, rect) = *self.page_rects.iter().min_by(|a, b| {
+            a.1.distance_to_pos(pos)
+                .partial_cmp(&b.1.distance_to_pos(pos))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        let chars = self.chars_for(index);
+        let (w_pts, _) = self.doc.page_size_points(index);
+        let scale = rect.width() / w_pts.max(1.0);
+        let caret = if pos.y < rect.min.y {
+            0
+        } else if pos.y > rect.max.y {
+            chars.len()
+        } else {
+            let p = (pos - rect.min) / scale;
+            chars.caret_at(p.x, p.y).unwrap_or(0)
+        };
+        Some(TextPos { page: index, caret })
+    }
+
+    /// Texto de la selección actual (vacío si no hay).
+    pub fn selection_text(&mut self) -> String {
+        let Some(sel) = self.selection else {
+            return String::new();
+        };
+        let (a, b) = sel.ordered();
+        let last_page = b.page.min(self.page_count().saturating_sub(1));
+        let mut parts = Vec::new();
+        for page in a.page..=last_page {
+            let chars = self.chars_for(page);
+            let from = if page == a.page { a.caret } else { 0 };
+            let to = if page == b.page { b.caret } else { chars.len() };
+            let text = chars.text_of(from, to);
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+        parts.join("\n")
+    }
 }
 
 pub struct App {
@@ -260,6 +391,11 @@ pub struct App {
     search_pending: Option<Instant>,
     /// `false` hasta que el usuario salta al primer resultado de la búsqueda actual.
     search_visited: bool,
+
+    /// Texto del cuadro "ir a página". Vive aquí (no se recrea cada frame) para poder escribir en él.
+    goto_input: String,
+    /// Cuándo se copió texto por última vez (para el aviso "Texto copiado").
+    copied_at: Option<Instant>,
 
     status: Option<String>,
     theme_applied: Option<ThemePreference>,
@@ -292,6 +428,8 @@ impl App {
             theme_applied: None,
             last_title: String::new(),
             last_tracked: None,
+            goto_input: String::new(),
+            copied_at: None,
             dirty: false,
             last_save: Instant::now(),
         };
@@ -482,6 +620,16 @@ impl App {
         }
     }
 
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        if let Some(doc) = &mut self.document {
+            let text = doc.selection_text();
+            if !text.is_empty() {
+                ctx.copy_text(text);
+                self.copied_at = Some(Instant::now());
+            }
+        }
+    }
+
     fn apply_shortcut(&mut self, action: ShortcutAction) {
         match action {
             ShortcutAction::NextPage => self.go_to_relative(1),
@@ -506,6 +654,8 @@ impl App {
             ShortcutAction::CloseOverlay => {
                 if self.search_open {
                     self.toggle_search();
+                } else if let Some(doc) = &mut self.document {
+                    doc.selection = None;
                 }
             }
         }
@@ -572,8 +722,8 @@ impl App {
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = match &self.document {
-            Some(doc) => format!("{} — Lector PDF", doc.title()),
-            None => "Lector PDF".to_string(),
+            Some(doc) => format!("{} - Flint Reader", doc.title()),
+            None => "Flint Reader".to_string(),
         };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -611,18 +761,23 @@ impl eframe::App for App {
             }
         }
 
+        // ---------- Copiar el texto seleccionado (Ctrl+C) ----------
+        let copy_requested = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        if copy_requested && !ctx.wants_keyboard_input() {
+            self.copy_selection(ctx);
+        }
+
         // ---------- Barra de herramientas (abajo) ----------
         let (current_page, page_count, zoom, sidebar_available) = match &self.document {
             Some(d) => (d.current_page, d.page_count(), d.zoom, !d.outline.is_empty()),
             None => (0, 0, 1.0, false),
         };
-        let mut goto_input = String::new();
         let toolbar_actions = {
             let mut tb = ToolbarState {
                 current_page,
                 page_count,
                 zoom,
-                goto_input: &mut goto_input,
+                goto_input: &mut self.goto_input,
                 view: self.view,
                 theme: self.config.settings.theme,
                 scroll_mode: self.config.settings.scroll_mode,
@@ -707,18 +862,36 @@ impl eframe::App for App {
                     } else {
                         ui.add_space(64.0);
                         ui.vertical_centered(|ui| {
-                            ui.heading("Lector PDF");
+                            ui.heading("Flint Reader");
                             ui.add_space(8.0);
                             ui.label("Arrastra un PDF aquí, o ábrelo con el botón de abajo.");
                             ui.add_space(16.0);
                             if ui.button("Abrir un PDF…").clicked() {
                                 open_requested = true;
                             }
+                            ui.add_space(24.0);
+                            ui.weak(format!("Versión {}", crate::utils::VERSION));
                         });
                     }
                 }
             }
         });
+
+        if let Some(t) = self.copied_at {
+            if t.elapsed() < Duration::from_millis(1600) {
+                egui::Area::new(egui::Id::new("copied_toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -64.0])
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label("Texto copiado");
+                        });
+                    });
+                ctx.request_repaint_after(Duration::from_millis(200));
+            } else {
+                self.copied_at = None;
+            }
+        }
 
         if open_requested {
             self.pick_and_open();

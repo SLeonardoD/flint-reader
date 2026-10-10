@@ -1,11 +1,7 @@
 //! Prueba del módulo `pdf` sin ventana gráfica.
 //! Uso: cargo run --example smoke_test -- archivo.pdf "palabra"
 
-#[path = "../src/pdf/mod.rs"]
-#[allow(dead_code)]
-mod pdf;
-
-use pdf::{LinkTarget, PdfEngine};
+use flint_reader::pdf::{LinkTarget, PdfEngine};
 use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
@@ -23,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         println!("  pág {i}: {w:.0} x {h:.0} pts");
     }
 
-    fn print_tree(nodes: &[pdf::OutlineNode], depth: usize) {
+    fn print_tree(nodes: &[flint_reader::pdf::OutlineNode], depth: usize) {
         for n in nodes {
             println!("    {}- \"{}\" -> {:?}", "  ".repeat(depth), n.title, n.page_index);
             print_tree(&n.children, depth + 1);

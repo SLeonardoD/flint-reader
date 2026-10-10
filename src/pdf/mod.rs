@@ -5,8 +5,10 @@
 mod document;
 mod outline;
 mod search;
+mod text;
 
 pub use document::{
     LinkTarget, OpenDocument, OutlineNode, PageLink, PdfEngine, PIXELS_PER_POINT,
 };
 pub use search::SearchMatch;
+pub use text::PageChars;

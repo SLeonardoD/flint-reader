@@ -21,6 +21,12 @@ pub struct AppConfig {
 
 impl AppConfig {
     fn config_path() -> Option<PathBuf> {
+        directories::ProjectDirs::from("com", "flint-reader", "flint-reader")
+            .map(|dirs| dirs.config_dir().join("config.toml"))
+    }
+
+    /// Ruta de la configuración con el nombre anterior del proyecto (pdf-lector).
+    fn legacy_config_path() -> Option<PathBuf> {
         directories::ProjectDirs::from("com", "pdf-lector", "pdf-lector")
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
@@ -33,7 +39,15 @@ impl AppConfig {
             return Self::default();
         };
 
-        match std::fs::read_to_string(&path) {
+        // Migración: si todavía no hay configuración de Flint Reader pero sí la del
+        // nombre anterior, se lee esa (recientes y ajustes); al guardar pasa a la nueva.
+        let source = if path.exists() {
+            path
+        } else {
+            Self::legacy_config_path().filter(|p| p.exists()).unwrap_or(path)
+        };
+
+        match std::fs::read_to_string(&source) {
             Ok(contents) => toml::from_str(&contents).unwrap_or_else(|err| {
                 tracing::warn!("config.toml inválido ({err}); usando valores por defecto");
                 Self::default()

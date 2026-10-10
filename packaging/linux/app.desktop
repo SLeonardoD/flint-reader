@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Lector PDF
+Name=Flint Reader
 Comment=Lector de PDF minimalista y de bajo consumo
-Exec=pdf-lector %f
-Icon=pdf-lector
+Exec=flint-reader %f
+Icon=flint-reader
 Terminal=false
 Categories=Office;Viewer;
 MimeType=application/pdf;

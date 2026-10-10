@@ -4,6 +4,7 @@
 
 pub mod icons;
 pub mod recent_tab;
+pub mod selection;
 pub mod search_bar;
 pub mod sidebar;
 pub mod theme;

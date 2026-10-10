@@ -4,16 +4,11 @@
 use serde::{Deserialize, Serialize};
 
 /// Preferencia de tema visual de la aplicación.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemePreference {
     Light,
+    #[default]
     Dark,
-}
-
-impl Default for ThemePreference {
-    fn default() -> Self {
-        ThemePreference::Dark
-    }
 }
 
 impl ThemePreference {
@@ -33,18 +28,13 @@ impl ThemePreference {
 }
 
 /// Modo de desplazamiento del documento dentro del visor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ScrollMode {
     /// Todas las páginas en una tira continua, como una página web larga.
+    #[default]
     Continuous,
     /// Una página visible a la vez, como pasar hojas de un libro.
     Paginated,
-}
-
-impl Default for ScrollMode {
-    fn default() -> Self {
-        ScrollMode::Continuous
-    }
 }
 
 impl ScrollMode {

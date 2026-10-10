@@ -10,3 +10,17 @@ pub fn clamp_zoom(zoom: f32) -> f32 {
 }
 /// Cuántos píxeles se desplaza el documento con las flechas arriba/abajo.
 pub const SCROLL_STEP: f32 = 80.0;
+
+/// Versión del programa (la de `Cargo.toml`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// El archivo `VERSION` y `Cargo.toml` deben decir lo mismo: si no, `cargo test` avisa.
+    #[test]
+    fn version_file_matches_cargo_toml() {
+        assert_eq!(include_str!("../VERSION").trim(), VERSION);
+    }
+}

@@ -1,7 +1,8 @@
 [package]
-name = "pdf-lector"
-version = "0.1.0"
+name = "flint-reader"
+version = "0.1.2"
 edition = "2021"
+description = "Lector de PDF minimalista y de bajo consumo"
 
 [dependencies]
 eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "x11"] }

@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use pdfium_render::prelude::*;
+use crate::pdf::text::PageChars;
 use std::path::{Path, PathBuf};
 
 /// Motor PDF compartido por toda la aplicación. Se crea una sola vez; la
@@ -19,32 +20,42 @@ pub struct PdfEngine {
 }
 
 impl PdfEngine {
-    /// Busca la librería nativa (`pdfium.dll` / `libpdfium.so`) primero junto
-    /// al ejecutable, luego en el directorio de trabajo, y por último como
-    /// librería instalada en el sistema.
+    /// Busca la librería nativa de PDFium (`pdfium.dll` / `libpdfium.so`).
+    ///
+    /// Orden: variable `FLINT_PDFIUM_DIR`; junto al ejecutable; la carpeta
+    /// `pdfium/<plataforma>/` del proyecto (se prueba subiendo desde el
+    /// ejecutable, así funciona con `cargo run` y con una carpeta portable);
+    /// el directorio actual; la carpeta del código fuente (solo desarrollo);
+    /// y por último una instalación del sistema.
     pub fn new() -> Result<Self> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                dirs.push(dir.to_path_buf());
-            }
-        }
-        dirs.push(PathBuf::from("."));
+        let dirs = candidate_dirs();
 
         for dir in &dirs {
             let lib = Pdfium::pdfium_platform_library_name_at_path(dir);
-            if let Ok(bindings) = Pdfium::bind_to_library(lib) {
+            if let Ok(bindings) = Pdfium::bind_to_library(&lib) {
+                tracing::info!("PDFium cargado desde {}", lib.display());
                 return Ok(Self::from_bindings(bindings));
             }
         }
 
         match Pdfium::bind_to_system_library() {
-            Ok(bindings) => Ok(Self::from_bindings(bindings)),
-            Err(err) => Err(anyhow!(
-                "No se pudo cargar la librería nativa de PDFium \
-                 (pdfium.dll / libpdfium.so). Colócala junto al ejecutable \
-                 o en la carpeta desde la que lo lanzas. Detalle: {err}"
-            )),
+            Ok(bindings) => {
+                tracing::info!("PDFium cargado desde el sistema");
+                Ok(Self::from_bindings(bindings))
+            }
+            Err(err) => {
+                let searched: Vec<String> = dirs.iter().map(|d| format!("  - {}", d.display())).collect();
+                Err(anyhow!(
+                    "No se encontró la librería nativa de PDFium ({}).\n\
+                     Se buscó en:\n{}\n\
+                     Colócala en pdfium/{}/ dentro del proyecto, junto al ejecutable, \
+                     o indica su carpeta con la variable FLINT_PDFIUM_DIR.\n\
+                     Detalle: {err}",
+                    platform_library_name(),
+                    searched.join("\n"),
+                    platform_dir(),
+                ))
+            }
         }
     }
 
@@ -73,6 +84,65 @@ impl PdfEngine {
             page_sizes,
         })
     }
+}
+
+/// Subcarpeta de `pdfium/` que corresponde a esta plataforma.
+fn platform_dir() -> &'static str {
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "aarch64") { "windows-arm64" } else { "windows-x64" }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x64" }
+    } else if cfg!(target_arch = "aarch64") {
+        "linux-arm64"
+    } else {
+        "linux-x64"
+    }
+}
+
+fn platform_library_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+/// Carpetas donde buscar PDFium, en orden de prioridad.
+fn candidate_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut add = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+
+    if let Some(custom) = std::env::var_os("FLINT_PDFIUM_DIR") {
+        add(PathBuf::from(custom));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            add(exe_dir.to_path_buf());
+            // Desde el ejecutable hacia arriba: target/debug/ -> target/ -> proyecto/.
+            for ancestor in exe_dir.ancestors().take(5) {
+                add(ancestor.join("pdfium").join(platform_dir()));
+                add(ancestor.join("pdfium"));
+            }
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        add(cwd.join("pdfium").join(platform_dir()));
+        add(cwd);
+    }
+
+    // Ruta del código fuente en el momento de compilar: cubre `cargo run` y
+    // `cargo test` aunque el ejecutable se haya movido.
+    add(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pdfium").join(platform_dir()));
+
+    dirs
 }
 
 /// Lee el tamaño (en puntos) de todas las páginas una sola vez. La UI lo
@@ -233,6 +303,41 @@ impl OpenDocument {
             }
         }
         out
+    }
+
+    /// Caracteres de una página con su caja, para seleccionar y copiar texto.
+    /// Devuelve un resultado vacío si la página no tiene texto seleccionable.
+    pub fn page_chars(&self, index: usize) -> PageChars {
+        let Ok(page) = self.doc.pages().get(index as u16) else {
+            return PageChars::default();
+        };
+        let page_h = page.height().value;
+        let Ok(text) = page.text() else {
+            return PageChars::default();
+        };
+
+        let mut chars = Vec::new();
+        let mut rects = Vec::new();
+        let mut solid = Vec::new();
+
+        for ch in text.chars().iter() {
+            let c = ch.unicode_char().unwrap_or(' ');
+            let generated = ch.is_generated().unwrap_or(false);
+            let rect = ch.loose_bounds().ok().map(|b| {
+                [
+                    b.left().value,
+                    page_h - b.top().value,
+                    b.right().value,
+                    page_h - b.bottom().value,
+                ]
+            });
+            let usable = rect.is_some_and(|r| r[2] - r[0] > 0.01 && r[3] - r[1] > 0.01) && !generated;
+            chars.push(c);
+            rects.push(rect.unwrap_or([0.0; 4]));
+            solid.push(usable);
+        }
+
+        PageChars::new(chars, rects, solid)
     }
 
     /// Enlaces clicables de una página (saltos internos y URLs).
