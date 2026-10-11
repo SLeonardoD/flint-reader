@@ -64,7 +64,7 @@ pub fn inline(ui: &mut Ui, icon: Icon) {
 pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let r = 7.0_f32;
-    let s = Stroke::new(1.7, color);
+    let s = Stroke::new(1.7_f32, color);
     let pt = |x: f32, y: f32| pos2(c.x + x * r, c.y + y * r);
 
     match icon {
@@ -139,8 +139,8 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Paged => {
             // Una sola página
             p.rect_stroke(Rect::from_min_max(pt(-0.6, -1.0), pt(0.6, 1.0)), 1.0, s);
-            p.line_segment([pt(-0.25, -0.35), pt(0.25, -0.35)], Stroke::new(1.2, color));
-            p.line_segment([pt(-0.25, 0.1), pt(0.25, 0.1)], Stroke::new(1.2, color));
+            p.line_segment([pt(-0.25, -0.35), pt(0.25, -0.35)], Stroke::new(1.2_f32, color));
+            p.line_segment([pt(-0.25, 0.1), pt(0.25, 0.1)], Stroke::new(1.2_f32, color));
         }
     }
 }

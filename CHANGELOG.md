@@ -17,6 +17,42 @@ Registro de cambios de **Flint Reader**, y del estado en que queda cada versión
 
 ---
 
+## [0.1.3]
+
+Iteración sobre las pruebas de 0.1.2.
+
+### Cambios
+- **Corregido:** barra de desplazamiento **horizontal permanente**, con cualquier
+  zoom y tamaño de documento. El ancho del contenido se calculaba con el ancho
+  total del panel y no descontaba la barra vertical; ese sobrante de unos
+  píxeles bastaba para generar desplazamiento horizontal. Ahora se usa el ancho
+  realmente visible. Las barras solo aparecen cuando el contenido de verdad
+  sobrepasa la ventana (comprobado: sin barra al 100 % en continuo y por página;
+  con barra a zoom alto).
+- **Cambiado:** el título de la ventana es `Flint Reader - documento.pdf`
+  (antes `documento.pdf - Flint Reader`).
+- **Nuevo:** menú contextual de **copiar**: clic derecho sobre el texto
+  seleccionado muestra "Copiar  Ctrl+C". Se cierra al elegirlo, con `Esc` o al
+  pulsar en otro sitio. Es opcional: quien use `Ctrl+C` no lo ve ni lo necesita.
+  Se eligió el clic derecho (y no el izquierdo) porque el izquierdo ya significa
+  "deseleccionar / empezar otra selección". Acierta sobre el bloque azul, incluido
+  el hueco entre líneas (con una tolerancia de unos puntos).
+- **Corregido:** 7 avisos `float_literal_f32_fallback` de las versiones recientes
+  de `rustc` (lint *future-incompatible*: pasará a error). Eran literales sin
+  sufijo en `Stroke::new(...)`; ahora llevan `_f32`. Se añade `rust-version = "1.85"`.
+
+### Estado
+- Verificado en Linux con ventana real: título, ausencia/presencia de la barra
+  horizontal, y el menú contextual (no sale sin selección ni fuera de ella;
+  "Copiar" deja en el portapapeles el texto exacto; `Esc` lo cierra).
+- `cargo build` sin warnings; `cargo test` y `cargo clippy --all-targets` limpios.
+- El icono "e" de la esquina de la ventana es el icono por defecto de `eframe`
+  (confirmado por el usuario). Un icono propio sigue en pendientes.
+- Sin reporte, en esta ronda, sobre el índice en modo continuo (ver 0.1.2).
+- No verificado aquí: Windows (lo prueba el usuario, que ya compiló 0.1.2 allí).
+
+---
+
 ## [0.1.2]
 
 Desarrollo en curso. Esta es la versión que sigue a las pruebas de 0.1.1.
@@ -49,6 +85,9 @@ Desarrollo en curso. Esta es la versión que sigue a las pruebas de 0.1.1.
   (imports sin usar, dos `impl Default` derivables, un `map_or`).
 
 ### Estado
+- Confirmado por el usuario tras probar 0.1.2 en Windows: escribir un número en
+  el cuadro de página, el autoscroll con la rueda y la selección/copia de texto
+  funcionan.
 - Verificado en Linux con ventana real (servidor gráfico virtual): escribir el
   número de página despacio, selección y copia (arrastre, inverso, doble clic,
   entre páginas), autoscroll con parada, título, búsqueda de PDFium en
@@ -59,7 +98,8 @@ Desarrollo en curso. Esta es la versión que sigue a las pruebas de 0.1.1.
     marcadores anidados, tamaños de página mixtos y saltos lejanos). Se añadió
     el salto autocorregido y un registro; si persiste, ejecutar con
     `RUST_LOG=info` y compartir las líneas "Ir a la página ...".
-  - *Título "e" en la barra de ventana (Windows):* no reproducible en Linux.
+  - *Título "e" en la barra de ventana (Windows):* **resuelto** — era el icono
+    por defecto de `eframe`, no el título (confirmado por el usuario en 0.1.3).
   - Compilación y ejecución en Windows; `cargo clippy` con el código nuevo.
 - Limitaciones conocidas: la selección asume páginas sin rotación; no hay
   triple clic ni "seleccionar todo".

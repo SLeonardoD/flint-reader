@@ -97,6 +97,11 @@ pub struct DocumentState {
     /// Verdadero el frame en que un clic cierra el autoscroll: ese clic no debe abrir un enlace.
     pub ignore_click: bool,
 
+    // --- menú contextual de la selección (clic derecho -> "Copiar") ---
+    pub ctx_menu: Option<egui::Pos2>,
+    /// El menú pidió copiar; `App` lo atiende en el siguiente frame.
+    pub copy_requested: bool,
+
     // --- selección de texto ---
     pub selection: Option<Selection>,
     pub sel_drag: Option<SelDrag>,
@@ -134,6 +139,8 @@ impl DocumentState {
             viewer_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
             autoscroll_origin: None,
             ignore_click: false,
+            ctx_menu: None,
+            copy_requested: false,
             selection: None,
             sel_drag: None,
             page_rects: Vec::new(),
@@ -722,7 +729,7 @@ impl App {
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = match &self.document {
-            Some(doc) => format!("{} - Flint Reader", doc.title()),
+            Some(doc) => format!("Flint Reader - {}", doc.title()),
             None => "Flint Reader".to_string(),
         };
         if title != self.last_title {
@@ -763,7 +770,11 @@ impl eframe::App for App {
 
         // ---------- Copiar el texto seleccionado (Ctrl+C) ----------
         let copy_requested = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-        if copy_requested && !ctx.wants_keyboard_input() {
+        let menu_copy = self
+            .document
+            .as_mut()
+            .is_some_and(|d| std::mem::take(&mut d.copy_requested));
+        if (copy_requested && !ctx.wants_keyboard_input()) || menu_copy {
             self.copy_selection(ctx);
         }
 

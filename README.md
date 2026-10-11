@@ -17,7 +17,7 @@ Versión actual: ver [`VERSION`](VERSION). Historial: [`CHANGELOG.md`](CHANGELOG
 - Abrir PDF (`Ctrl+O`, arrastrar y soltar, o `flint-reader archivo.pdf`)
 - Recordar **página y zoom por documento**, y una pestaña de **Recientes**
 - **Búsqueda** en todo el documento, con resaltado y salto al resultado
-- **Seleccionar y copiar texto** (si el PDF lo permite)
+- **Seleccionar y copiar texto** (si el PDF lo permite), con `Ctrl+C` o clic derecho
 - Ir a página, zoom (botones, atajos y `Ctrl`+rueda), barra de posición
 - Desplazamiento **continuo** o **por página**
 - **Índice** (marcadores) y **enlaces** del PDF
@@ -38,7 +38,7 @@ sincronizar en la nube, pestañas múltiples.
 | Buscar | `Ctrl+F`; `Enter` / `Shift+Enter` = siguiente / anterior; `Esc` cierra |
 | Zoom | `Ctrl +` / `Ctrl -` / `Ctrl 0`, o `Ctrl`+rueda |
 | Seleccionar texto | arrastrar; doble clic = palabra; `Esc` quita la selección |
-| Copiar | `Ctrl+C` |
+| Copiar | `Ctrl+C`, o clic derecho sobre el texto seleccionado -> "Copiar" |
 | Autoscroll | **un clic con la rueda**, mover el ratón (más lejos = más rápido); otro clic o `Esc` lo detiene |
 | Abrir | `Ctrl+O` |
 

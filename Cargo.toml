@@ -1,6 +1,7 @@
 [package]
 name = "flint-reader"
-version = "0.1.2"
+version = "0.1.3"
+rust-version = "1.85"
 edition = "2021"
 description = "Lector de PDF minimalista y de bajo consumo"
 

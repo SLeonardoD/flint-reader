@@ -17,7 +17,7 @@ pub fn apply(ctx: &egui::Context, pref: ThemePreference) {
     };
 
     visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
     visuals.hyperlink_color = ACCENT;
 
     ctx.set_visuals(visuals);

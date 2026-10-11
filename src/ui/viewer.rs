@@ -54,14 +54,16 @@ pub fn show(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, mode: ScrollMod
         area = area.vertical_scroll_offset(y);
     }
     let jumped = target.y.is_some();
-    let avail_w = panel_rect.width();
 
     let offset = match mode {
         ScrollMode::Continuous => area
-            .show_viewport(ui, |ui, viewport| continuous(ui, ctx, doc, viewport, jumped, avail_w))
+            .show_viewport(ui, |ui, viewport| continuous(ui, ctx, doc, viewport, jumped))
             .state
             .offset,
-        ScrollMode::Paginated => area.show(ui, |ui| paginated(ui, ctx, doc, avail_w)).state.offset,
+        ScrollMode::Paginated => area
+            .show_viewport(ui, |ui, viewport| paginated(ui, ctx, doc, viewport.width()))
+            .state
+            .offset,
     };
     doc.scroll = offset;
 
@@ -104,7 +106,7 @@ fn handle_autoscroll(ctx: &Context, doc: &mut DocumentState, panel_rect: Rect) {
 
     if middle || primary || secondary || esc {
         doc.autoscroll_origin = None;
-        doc.ignore_click = primary;
+        doc.ignore_click = primary || secondary;
         ctx.request_repaint();
         return;
     }
@@ -130,7 +132,7 @@ fn handle_autoscroll(ctx: &Context, doc: &mut DocumentState, panel_rect: Rect) {
 fn paint_autoscroll_marker(ctx: &Context, origin: egui::Pos2) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("autoscroll_marker")));
     painter.circle_filled(origin, 14.0, Color32::from_black_alpha(170));
-    painter.circle_stroke(origin, 14.0, Stroke::new(1.5, Color32::WHITE));
+    painter.circle_stroke(origin, 14.0, Stroke::new(1.5_f32, Color32::WHITE));
     painter.circle_filled(origin, 2.0, Color32::WHITE);
     for (dx, dy) in [(0.0_f32, -1.0_f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
         let tip = origin + vec2(dx, dy) * 10.0;
@@ -140,14 +142,17 @@ fn paint_autoscroll_marker(ctx: &Context, origin: egui::Pos2) {
     }
 }
 
-fn continuous(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, viewport: Rect, jumped: bool, avail_w: f32) {
+fn continuous(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, viewport: Rect, jumped: bool) {
     // Sin espaciado automático: las posiciones de las páginas deben coincidir
     // exactamente con las que calcula `DocumentState::page_top`.
     ui.spacing_mut().item_spacing = Vec2::ZERO;
 
     let count = doc.page_count();
     let max_w = (0..count).map(|i| doc.page_extent(i).x).fold(0.0_f32, f32::max);
-    let content_w = (max_w + 2.0 * SIDE_MARGIN).max(avail_w);
+    // El ancho del contenido nunca debe superar el ancho *realmente visible*
+    // (`viewport`, que ya descuenta la barra vertical): si fuese unos píxeles
+    // mayor, aparecería una barra horizontal permanente sin nada que desplazar.
+    let content_w = (max_w + 2.0 * SIDE_MARGIN).max(viewport.width());
 
     ui.add_space(PAGE_GAP);
     let mut y = PAGE_GAP;
@@ -208,12 +213,13 @@ fn continuous(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, viewport: Rec
     }
 }
 
-fn paginated(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, avail_w: f32) {
+fn paginated(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, visible_w: f32) {
     ui.spacing_mut().item_spacing = Vec2::ZERO;
 
     let index = doc.current_page;
     let ext = doc.page_extent(index);
-    let content_w = (ext.x + 2.0 * SIDE_MARGIN).max(avail_w);
+    // Igual que en el modo continuo: el ancho visible ya descuenta la barra vertical.
+    let content_w = (ext.x + 2.0 * SIDE_MARGIN).max(visible_w);
 
     ui.add_space(PAGE_GAP);
     let (row, _) = ui.allocate_exact_size(vec2(content_w, ext.y), Sense::hover());
@@ -236,7 +242,7 @@ fn draw_page(ui: &mut Ui, ctx: &Context, doc: &mut DocumentState, index: usize, 
         }
     }
     ui.painter()
-        .rect_stroke(page_rect, 0.0, Stroke::new(1.0, Color32::from_black_alpha(60)));
+        .rect_stroke(page_rect, 0.0, Stroke::new(1.0_f32, Color32::from_black_alpha(60)));
 
     doc.page_rects.push((index, page_rect));
     paint_overlays(ui, doc, index, page_rect);
@@ -286,7 +292,7 @@ fn paint_overlays(ui: &mut Ui, doc: &mut DocumentState, index: usize, page_rect:
         if response.hovered() && !doc.ignore_click {
             doc.hovering_link = true;
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            ui.painter().rect_stroke(rect, 1.0, Stroke::new(1.0, theme::ACCENT));
+            ui.painter().rect_stroke(rect, 1.0, Stroke::new(1.0_f32, theme::ACCENT));
         }
         if response.clicked() && !doc.ignore_click {
             doc.pending_link = Some(link.target.clone());

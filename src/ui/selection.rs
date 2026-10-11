@@ -18,9 +18,12 @@ pub fn handle(ctx: &Context, doc: &mut DocumentState, panel_rect: Rect) {
         return;
     }
 
-    let (pressed, down, double_click, pos, delta, dt) = ctx.input(|i| {
+    let (pressed, secondary, any_pressed, esc, down, double_click, pos, delta, dt) = ctx.input(|i| {
         (
             i.pointer.button_pressed(PointerButton::Primary),
+            i.pointer.button_pressed(PointerButton::Secondary),
+            i.pointer.any_pressed(),
+            i.key_pressed(egui::Key::Escape),
             i.pointer.primary_down(),
             i.pointer.button_double_clicked(PointerButton::Primary),
             i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()),
@@ -38,6 +41,20 @@ pub fn handle(ctx: &Context, doc: &mut DocumentState, panel_rect: Rect) {
         && ctx
             .layer_id_at(pos)
             .is_none_or(|layer| layer.order == egui::Order::Background);
+
+    // Menú contextual: clic derecho sobre texto seleccionado -> "Copiar".
+    let mut just_opened = false;
+    if secondary && over_viewer && !doc.ignore_click {
+        doc.ctx_menu = None;
+        if over_selection(doc, pos) {
+            doc.ctx_menu = Some(pos);
+            just_opened = true;
+            ctx.request_repaint();
+        }
+    }
+    if doc.ctx_menu.is_some() {
+        copy_menu(ctx, doc, any_pressed && !just_opened, esc);
+    }
 
     // Cursor de texto sobre texto seleccionable (los enlaces tienen su propio cursor).
     if over_viewer && doc.sel_drag.is_none() && !doc.hovering_link {
@@ -121,5 +138,64 @@ pub fn handle(ctx: &Context, doc: &mut DocumentState, panel_rect: Rect) {
             doc.sel_drag = None;
             ctx.request_repaint();
         }
+    }
+}
+
+/// `true` si `pos` (en pantalla) cae sobre texto que forma parte de la selección.
+fn over_selection(doc: &mut DocumentState, pos: egui::Pos2) -> bool {
+    let Some(sel) = doc.selection else {
+        return false;
+    };
+    let Some((page, pt)) = doc.page_at(pos) else {
+        return false;
+    };
+    let (a, b) = sel.ordered();
+    if page < a.page || page > b.page {
+        return false;
+    }
+    let chars = doc.chars_for(page);
+    let from = if page == a.page { a.caret } else { 0 };
+    let to = if page == b.page { b.caret } else { chars.len() };
+    // Con tolerancia: se apunta al bloque azul, no a cada letra, y el hueco entre
+    // líneas también cuenta (exigir caer justo dentro de la caja de una letra
+    // haría que el menú "no saliera" por una diferencia de medio punto).
+    const PAD_X: f32 = 3.0;
+    const PAD_Y: f32 = 4.0;
+    chars.rects_for(from, to).iter().any(|r| {
+        pt.x >= r[0] - PAD_X && pt.x <= r[2] + PAD_X && pt.y >= r[1] - PAD_Y && pt.y <= r[3] + PAD_Y
+    })
+}
+
+/// Pequeño menú flotante con una sola opción, "Copiar". Se cierra al elegirla,
+/// con `Esc`, o al pulsar en cualquier otro sitio.
+fn copy_menu(ctx: &Context, doc: &mut DocumentState, close_on_outside_press: bool, esc: bool) {
+    let Some(menu_pos) = doc.ctx_menu else {
+        return;
+    };
+    let mut close = esc;
+
+    let area = egui::Area::new(egui::Id::new("flint-copy-menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu_pos)
+        .show(ctx, |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                let copy = egui::Button::new("Copiar").shortcut_text("Ctrl+C").frame(false);
+                if ui.add(copy).clicked() {
+                    doc.copy_requested = true;
+                    close = true;
+                    ctx.request_repaint();
+                }
+            });
+        });
+
+    if close_on_outside_press {
+        let outside = ctx
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| !area.response.rect.contains(p));
+        close |= outside;
+    }
+    if close {
+        doc.ctx_menu = None;
+        ctx.request_repaint();
     }
 }
